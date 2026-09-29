@@ -18,25 +18,39 @@ const uaList = [
 
 // ===== Storage =====
 let backendHosts = [];
+
 function defaultHosts() {
   return String(process.env.HOST || 'lo.kopikapal23.workers.dev')
-    .split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
+
 function loadHosts() {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const j = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-      if (Array.isArray(j.hosts)) { backendHosts = j.hosts.filter(Boolean); return; }
+      if (Array.isArray(j.hosts)) {
+        backendHosts = j.hosts.filter(Boolean);
+        return;
+      }
     }
-  } catch (e) { console.error('load:', e.message); }
-  backendHosts = defaultHosts(); saveHosts();
+  } catch (e) {
+    console.error('load:', e.message);
+  }
+  backendHosts = defaultHosts();
+  saveHosts();
 }
+
 function saveHosts() {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(DATA_FILE, JSON.stringify({ hosts: backendHosts }, null, 2));
-  } catch (e) { console.error('save:', e.message); }
+  } catch (e) {
+    console.error('save:', e.message);
+  }
 }
+
 loadHosts();
 
 app.use(express.json({ limit: '1mb' }));
@@ -47,33 +61,61 @@ app.use(express.text({ type: 'text/*', limit: '1mb' }));
 function auth(req, res) {
   if (!SET_KEY) return true;
   const k = req.query.key || req.headers['x-set-key'] || (req.body && req.body.key);
-  if (k !== SET_KEY) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return false; }
+  if (k !== SET_KEY) {
+    res.status(401).json({ ok: false, error: 'Unauthorized' });
+    return false;
+  }
   return true;
 }
+
+// >>> FIX: split per newline / koma / spasi
 function parseHosts(b) {
-  let a = [];
-  if (b && b.host) a = [].concat(b.host);
-  else if (Array.isArray(b)) a = b;
-  else if (typeof b === 'string') a = b.split(/[\s,]+/);
-  return a.map((s) => String(s).trim()).filter(Boolean);
+  let arr = [];
+  if (b && b.host !== undefined) {
+    arr = Array.isArray(b.host) ? b.host : [b.host];
+  } else if (Array.isArray(b)) {
+    arr = b;
+  } else if (typeof b === 'string') {
+    arr = [b];
+  }
+  return arr
+    .flatMap((s) => String(s).split(/[\s,]+/))
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
-app.get('/set/api/list', (req, res) => { if (!auth(req, res)) return; res.json({ ok: true, hosts: backendHosts }); });
-app.post('/set/api/add', (req, res) => { if (!auth(req, res)) return;
+app.get('/set/api/list', (req, res) => {
+  if (!auth(req, res)) return;
+  res.json({ ok: true, hosts: backendHosts });
+});
+
+app.post('/set/api/add', (req, res) => {
+  if (!auth(req, res)) return;
   backendHosts = Array.from(new Set([...backendHosts, ...parseHosts(req.body)]));
-  saveHosts(); res.json({ ok: true, hosts: backendHosts });
+  saveHosts();
+  res.json({ ok: true, hosts: backendHosts });
 });
-app.post('/set/api/set', (req, res) => { if (!auth(req, res)) return;
+
+app.post('/set/api/set', (req, res) => {
+  if (!auth(req, res)) return;
   backendHosts = Array.from(new Set(parseHosts(req.body)));
-  saveHosts(); res.json({ ok: true, hosts: backendHosts });
+  saveHosts();
+  res.json({ ok: true, hosts: backendHosts });
 });
-app.post('/set/api/delete', (req, res) => { if (!auth(req, res)) return;
+
+app.post('/set/api/delete', (req, res) => {
+  if (!auth(req, res)) return;
   const t = parseHosts(req.body);
   backendHosts = backendHosts.filter((h) => !t.includes(h));
-  saveHosts(); res.json({ ok: true, hosts: backendHosts });
+  saveHosts();
+  res.json({ ok: true, hosts: backendHosts });
 });
-app.post('/set/api/clear', (req, res) => { if (!auth(req, res)) return;
-  backendHosts = []; saveHosts(); res.json({ ok: true, hosts: backendHosts });
+
+app.post('/set/api/clear', (req, res) => {
+  if (!auth(req, res)) return;
+  backendHosts = [];
+  saveHosts();
+  res.json({ ok: true, hosts: backendHosts });
 });
 
 // ===== /cek : uji TCP/TLS ke backend =====
@@ -84,27 +126,46 @@ app.get('/cek', async (req, res) => {
     const row = { host };
     await new Promise((resolve) => {
       const t0 = Date.now();
-      const r = https.request({ hostname: host, port: 443, path: '/', method: 'HEAD', timeout: 8000 }, (up) => {
-        row.status = up.statusCode;
+      const r = https.request(
+        { hostname: host, port: 443, path: '/', method: 'HEAD', timeout: 8000 },
+        (up) => {
+          row.status = up.statusCode;
+          row.ms = Date.now() - t0;
+          up.resume();
+          resolve();
+        }
+      );
+      r.on('error', (e) => {
+        row.error = e.code || e.message;
         row.ms = Date.now() - t0;
-        up.resume();
         resolve();
       });
-      r.on('error', (e) => { row.error = e.code || e.message; row.ms = Date.now() - t0; resolve(); });
-      r.on('timeout', () => { r.destroy(); row.error = 'TIMEOUT'; resolve(); });
+      r.on('timeout', () => {
+        r.destroy();
+        row.error = 'TIMEOUT';
+        resolve();
+      });
       r.end();
     });
     out.push(row);
   }
-  res.json({ hosts: out, note: 'Kalau semua error → backend gak bisa diakses dari Railway (kemungkinan CF block IP Railway)' });
+  res.json({
+    hosts: out,
+    note: 'Kalau semua error → backend gak bisa diakses dari Railway (kemungkinan CF block IP Railway)',
+  });
 });
 
 // ===== /set UI =====
-app.get('/set', (req, res) => { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(UI()); });
+app.get('/set', (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(UI());
+});
 
 // ===== PROXY HTTP =====
 app.all('*', async (req, res) => {
-  if (req.path.startsWith('/set') || req.path === '/cek') return res.status(404).send('Not found');
+  if (req.path.startsWith('/set') || req.path === '/cek') {
+    return res.status(404).send('Not found');
+  }
   if (backendHosts.length === 0) return res.status(503).send('No backend');
 
   const chunks = [];
@@ -137,21 +198,32 @@ function proxyHttp(req, res, host, body) {
     if (body.length) headers['content-length'] = String(body.length);
 
     let settled = false;
-    const up = https.request({
-      hostname: host, port: 443, path: req.originalUrl || req.url,
-      method: req.method, headers, timeout: 15000,
-    }, (r) => {
-      settled = true;
-      res.status(r.statusCode);
-      for (const [k, v] of Object.entries(r.headers)) {
-        if (['transfer-encoding', 'connection', 'keep-alive'].includes(k.toLowerCase())) continue;
-        try { res.setHeader(k, v); } catch {}
+    const up = https.request(
+      {
+        hostname: host,
+        port: 443,
+        path: req.originalUrl || req.url,
+        method: req.method,
+        headers,
+        timeout: 15000,
+      },
+      (r) => {
+        settled = true;
+        res.status(r.statusCode);
+        for (const [k, v] of Object.entries(r.headers)) {
+          if (['transfer-encoding', 'connection', 'keep-alive'].includes(k.toLowerCase())) continue;
+          try {
+            res.setHeader(k, v);
+          } catch {}
+        }
+        r.pipe(res);
+        r.on('end', resolve);
+        r.on('error', reject);
       }
-      r.pipe(res);
-      r.on('end', resolve);
-      r.on('error', reject);
+    );
+    up.on('error', (e) => {
+      if (!settled) reject(e);
     });
-    up.on('error', (e) => { if (!settled) reject(e); });
     up.on('timeout', () => up.destroy(new Error('TIMEOUT')));
     if (body.length) up.write(body);
     up.end();
@@ -162,11 +234,18 @@ function proxyHttp(req, res, host, body) {
 const server = http.createServer(app);
 
 server.on('upgrade', (req, socket, head) => {
-  if (backendHosts.length === 0) { socket.destroy(); return; }
+  if (backendHosts.length === 0) {
+    socket.destroy();
+    return;
+  }
   const list = [...backendHosts].sort(() => Math.random() - 0.5);
   let i = 0;
   const next = () => {
-    if (i >= list.length) { if (DEBUG) console.log('[ws] semua host gagal'); socket.destroy(); return; }
+    if (i >= list.length) {
+      if (DEBUG) console.log('[ws] semua host gagal');
+      socket.destroy();
+      return;
+    }
     proxyUpgrade(req, socket, head, list[i++], next);
   };
   next();
@@ -180,7 +259,12 @@ function proxyUpgrade(req, socket, head, host, onFail) {
 
   let ok = false;
   const up = https.request({
-    hostname: host, port: 443, path: req.url, method: req.method, headers, timeout: 15000,
+    hostname: host,
+    port: 443,
+    path: req.url,
+    method: req.method,
+    headers,
+    timeout: 15000,
   });
 
   up.on('upgrade', (upRes, upSocket, upHead) => {
@@ -240,7 +324,7 @@ button{padding:9px 16px;border-radius:8px;border:none;cursor:pointer;font-weight
 <h1>Backend Manager <span class="badge" id="count">0</span></h1>
 <div class="sub">Cek backend: <a href="/cek" target="_blank" style="color:#60a5fa">/cek</a></div>
 <div class="card" id="authCard" style="display:none"><label>SET_KEY</label><input type="password" id="keyInput"><div class="row"><button class="btn-primary" id="saveKey">Simpan</button></div></div>
-<div class="card"><label>Tambah backend</label><textarea id="addInput" placeholder="vpn.contoh.workers.dev&#10;vpn.lain.workers.dev"></textarea>
+<div class="card"><label>Tambah backend (1 per baris atau pisah koma)</label><textarea id="addInput" placeholder="vpn.contoh.workers.dev&#10;vpn.lain.workers.dev"></textarea>
 <div class="row"><button class="btn-green" id="btnAdd">+ Tambah</button><button class="btn-ghost" id="btnSet">Ganti Semua</button></div></div>
 <div class="card"><label>Daftar</label><ul class="list" id="list"></ul>
 <div class="row"><button class="btn-danger" id="btnClear">Kosongkan</button><button class="btn-ghost" id="btnRefresh">Refresh</button></div></div>
