@@ -1,52 +1,41 @@
 const express = require('express');
+const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { Readable } = require('stream');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const SET_KEY = process.env.SET_KEY || '';
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const DATA_FILE = path.join(DATA_DIR, 'hosts.json');
-
-const pathUji = (() => {
-  let p = process.env.PATH || '/';
-  if (p.charAt(0) !== '/') p = '/' + p;
-  return p;
-})();
-const kodeRespon = String(process.env.CODE || '200');
-const DEBUG = process.env.DEBUG === '1';
+const DEBUG = process.env.DEBUG !== '0'; // default ON
 
 const uaList = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
 ];
 
 // ===== Storage =====
 let backendHosts = [];
-
 function defaultHosts() {
   return String(process.env.HOST || 'lo.kopikapal23.workers.dev')
     .split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 }
-
 function loadHosts() {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const j = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
       if (Array.isArray(j.hosts)) { backendHosts = j.hosts.filter(Boolean); return; }
     }
-  } catch (e) { console.error('loadHosts:', e.message); }
-  backendHosts = defaultHosts();
-  saveHosts();
+  } catch (e) { console.error('load:', e.message); }
+  backendHosts = defaultHosts(); saveHosts();
 }
 function saveHosts() {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(DATA_FILE, JSON.stringify({ hosts: backendHosts }, null, 2));
-  } catch (e) { console.error('saveHosts:', e.message); }
+  } catch (e) { console.error('save:', e.message); }
 }
 loadHosts();
 
@@ -54,195 +43,181 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.text({ type: 'text/*', limit: '1mb' }));
 
-// ===== Stealth fetch =====
-async function stealthFetch(resource, options = {}) {
-  const { timeout = 10000 } = options;
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-
-  const randomUA = uaList[Math.floor(Math.random() * uaList.length)];
-  const headers = new Headers(options.headers || {});
-  headers.set('User-Agent', randomUA);
-  headers.set('Cache-Control', 'no-cache');
-  headers.set('Pragma', 'no-cache');
-  headers.set('Upgrade-Insecure-Requests', '1');
-  headers.set('Sec-Fetch-Dest', 'document');
-  headers.set('Sec-Fetch-Mode', 'navigate');
-  headers.set('Sec-Fetch-Site', 'none');
-
-  try {
-    return await fetch(resource, { ...options, headers, signal: controller.signal });
-  } finally {
-    clearTimeout(id);
-  }
-}
-
 // ===== /set API =====
-function checkAuth(req, res) {
+function auth(req, res) {
   if (!SET_KEY) return true;
-  const key = req.query.key || req.headers['x-set-key'] || (req.body && req.body.key);
-  if (key !== SET_KEY) { res.status(401).json({ ok:false, error:'Unauthorized' }); return false; }
+  const k = req.query.key || req.headers['x-set-key'] || (req.body && req.body.key);
+  if (k !== SET_KEY) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return false; }
   return true;
 }
-function parseHosts(body) {
-  let arr = [];
-  if (body && body.host) arr = [].concat(body.host);
-  else if (Array.isArray(body)) arr = body;
-  else if (typeof body === 'string') arr = body.split(/[\s,]+/);
-  return arr.map((s) => String(s).trim()).filter(Boolean);
+function parseHosts(b) {
+  let a = [];
+  if (b && b.host) a = [].concat(b.host);
+  else if (Array.isArray(b)) a = b;
+  else if (typeof b === 'string') a = b.split(/[\s,]+/);
+  return a.map((s) => String(s).trim()).filter(Boolean);
 }
 
-app.get('/set/api/list', (req,res)=>{ if(!checkAuth(req,res))return; res.json({ok:true,hosts:backendHosts}); });
-app.post('/set/api/add', (req,res)=>{ if(!checkAuth(req,res))return;
+app.get('/set/api/list', (req, res) => { if (!auth(req, res)) return; res.json({ ok: true, hosts: backendHosts }); });
+app.post('/set/api/add', (req, res) => { if (!auth(req, res)) return;
   backendHosts = Array.from(new Set([...backendHosts, ...parseHosts(req.body)]));
-  saveHosts(); res.json({ok:true,hosts:backendHosts});
+  saveHosts(); res.json({ ok: true, hosts: backendHosts });
 });
-app.post('/set/api/set', (req,res)=>{ if(!checkAuth(req,res))return;
+app.post('/set/api/set', (req, res) => { if (!auth(req, res)) return;
   backendHosts = Array.from(new Set(parseHosts(req.body)));
-  saveHosts(); res.json({ok:true,hosts:backendHosts});
+  saveHosts(); res.json({ ok: true, hosts: backendHosts });
 });
-app.post('/set/api/delete', (req,res)=>{ if(!checkAuth(req,res))return;
+app.post('/set/api/delete', (req, res) => { if (!auth(req, res)) return;
   const t = parseHosts(req.body);
-  backendHosts = backendHosts.filter((h)=>!t.includes(h));
-  saveHosts(); res.json({ok:true,hosts:backendHosts});
+  backendHosts = backendHosts.filter((h) => !t.includes(h));
+  saveHosts(); res.json({ ok: true, hosts: backendHosts });
 });
-app.post('/set/api/clear', (req,res)=>{ if(!checkAuth(req,res))return;
-  backendHosts = []; saveHosts(); res.json({ok:true,hosts:backendHosts});
+app.post('/set/api/clear', (req, res) => { if (!auth(req, res)) return;
+  backendHosts = []; saveHosts(); res.json({ ok: true, hosts: backendHosts });
 });
 
-// ===== /debug : tes semua backend =====
-app.get('/debug', async (req, res) => {
-  if (!checkAuth(req, res)) return;
-  const results = [];
-  const [pp, sp] = pathUji.split('?');
+// ===== /cek : uji TCP/TLS ke backend =====
+app.get('/cek', async (req, res) => {
+  if (!auth(req, res)) return;
+  const out = [];
   for (const host of backendHosts) {
-    const t = new URL(`https://${host}${pp}${sp ? '?'+sp : ''}`);
-    const row = { host, url: t.href };
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(()=>ctrl.abort(), 8000);
-      const r = await stealthFetch(t.href, { method:'GET', redirect:'manual', signal:ctrl.signal });
-      clearTimeout(timer);
-      row.status = r.status;
-      row.contentType = r.headers.get('content-type') || '';
-      row.location = r.headers.get('location') || '';
-      const buf = Buffer.from(await r.arrayBuffer());
-      row.preview = buf.slice(0, 300).toString('utf8').replace(/\s+/g,' ').slice(0, 200);
-      row.ok = String(r.status) === kodeRespon || [301,302].includes(r.status);
-    } catch (e) {
-      row.error = e.message;
-      row.ok = false;
-    }
-    results.push(row);
+    const row = { host };
+    await new Promise((resolve) => {
+      const t0 = Date.now();
+      const r = https.request({ hostname: host, port: 443, path: '/', method: 'HEAD', timeout: 8000 }, (up) => {
+        row.status = up.statusCode;
+        row.ms = Date.now() - t0;
+        up.resume();
+        resolve();
+      });
+      r.on('error', (e) => { row.error = e.code || e.message; row.ms = Date.now() - t0; resolve(); });
+      r.on('timeout', () => { r.destroy(); row.error = 'TIMEOUT'; resolve(); });
+      r.end();
+    });
+    out.push(row);
   }
-  res.json({
-    ok: results.some(r=>r.ok),
-    pathUji,
-    kodeRespon,
-    expectedNote: `Sukses jika status = ${kodeRespon} atau 301/302`,
-    hosts: results,
-  });
+  res.json({ hosts: out, note: 'Kalau semua error → backend gak bisa diakses dari Railway (kemungkinan CF block IP Railway)' });
 });
 
-// ===== UI =====
-app.get('/set', (req,res)=>{ res.setHeader('Content-Type','text/html; charset=utf-8'); res.send(renderUI()); });
+// ===== /set UI =====
+app.get('/set', (req, res) => { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(UI()); });
 
-// ===== Proxy utama =====
-async function bufferBody(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  return Buffer.concat(chunks);
-}
-
-async function tryHost(req, url, host, bodyBuffer) {
-  const target = new URL(url.href);
-  target.protocol = 'https:';
-  target.host = host;
-
-  const headers = new Headers();
-  for (const [k, v] of Object.entries(req.headers)) {
-    const lk = k.toLowerCase();
-    if (['host','connection','content-length','transfer-encoding','accept-encoding','user-agent'].includes(lk)) continue;
-    try { headers.set(k, Array.isArray(v) ? v.join(', ') : v); } catch {}
-  }
-  headers.set('User-Agent', uaList[0]);
-
-  const init = { method: req.method, headers, redirect: 'manual' };
-  if (!['GET','HEAD'].includes(req.method) && bodyBuffer) init.body = bodyBuffer;
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10000);
-  init.signal = ctrl.signal;
-
-  try {
-    const resp = await fetch(target.href, init);
-    // Follow redirect manual supaya bisa balik ke client
-    return { resp, finalUrl: target.href };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function copyHeaders(resp, res) {
-  resp.headers.forEach((v, k) => {
-    const lk = k.toLowerCase();
-    if (['content-encoding','content-length','transfer-encoding','connection','content-security-policy'].includes(lk)) return;
-    try { res.setHeader(k, v); } catch {}
-  });
-}
-
+// ===== PROXY HTTP =====
 app.all('*', async (req, res) => {
-  if (req.path.startsWith('/set') || req.path === '/debug') {
-    return res.status(404).send('Not found');
-  }
-
-  const origin = `http://${req.headers.host}`;
-  const url = new URL(req.originalUrl || req.url, origin);
-
+  if (req.path.startsWith('/set') || req.path === '/cek') return res.status(404).send('Not found');
   if (backendHosts.length === 0) return res.status(503).send('No backend');
 
-  // Buffer body sekali (untuk retry)
-  let bodyBuffer = null;
-  if (!['GET','HEAD'].includes(req.method)) {
-    try { bodyBuffer = await bufferBody(req); } catch (e) { console.error('buffer:', e.message); }
-  }
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const body = Buffer.concat(chunks);
 
-  const shuffled = [...backendHosts].sort(() => Math.random() - 0.5);
+  const list = [...backendHosts].sort(() => Math.random() - 0.5);
   const errors = [];
 
-  for (const host of shuffled) {
+  for (const host of list) {
     try {
-      const { resp } = await tryHost(req, url, host, bodyBuffer);
-
-      // Anggap sukses kalau bukan error 5xx
-      if (resp.status >= 500 && resp.status !== 503) {
-        // tetap pakai, tapi catat
-        if (DEBUG) console.log(`[${host}] status ${resp.status}`);
-      }
-
-      res.status(resp.status);
-      copyHeaders(resp, res);
-
-      if (resp.body) {
-        Readable.fromWeb(resp.body).pipe(res);
-      } else {
-        res.end();
-      }
+      await proxyHttp(req, res, host, body);
       return;
     } catch (e) {
-      errors.push(`${host}: ${e.message}`);
-      console.log('Skipped:', host, '-', e.message);
+      errors.push(`${host}: ${e.code || e.message}`);
+      if (DEBUG) console.log(`[http] ${host} → ${e.code || e.message}`);
     }
   }
-
-  res.status(503).type('text/plain').send(
-    'Semua backend tidak merespon.\n\n' + errors.join('\n') +
-    '\n\nCoba buka /debug?key=... untuk lihat status tiap backend.'
-  );
+  res.status(502).type('text').send('All backends failed:\n' + errors.join('\n'));
 });
 
-// ===== HTML UI (sama seperti sebelumnya) =====
-function renderUI() { return `<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Backend Manager</title><style>
+function proxyHttp(req, res, host, body) {
+  return new Promise((resolve, reject) => {
+    const headers = { ...req.headers };
+    delete headers['host'];
+    delete headers['connection'];
+    delete headers['content-length'];
+    headers['host'] = host;
+    headers['user-agent'] = uaList[0];
+    if (body.length) headers['content-length'] = String(body.length);
+
+    let settled = false;
+    const up = https.request({
+      hostname: host, port: 443, path: req.originalUrl || req.url,
+      method: req.method, headers, timeout: 15000,
+    }, (r) => {
+      settled = true;
+      res.status(r.statusCode);
+      for (const [k, v] of Object.entries(r.headers)) {
+        if (['transfer-encoding', 'connection', 'keep-alive'].includes(k.toLowerCase())) continue;
+        try { res.setHeader(k, v); } catch {}
+      }
+      r.pipe(res);
+      r.on('end', resolve);
+      r.on('error', reject);
+    });
+    up.on('error', (e) => { if (!settled) reject(e); });
+    up.on('timeout', () => up.destroy(new Error('TIMEOUT')));
+    if (body.length) up.write(body);
+    up.end();
+  });
+}
+
+// ===== HTTP + WebSocket server =====
+const server = http.createServer(app);
+
+server.on('upgrade', (req, socket, head) => {
+  if (backendHosts.length === 0) { socket.destroy(); return; }
+  const list = [...backendHosts].sort(() => Math.random() - 0.5);
+  let i = 0;
+  const next = () => {
+    if (i >= list.length) { if (DEBUG) console.log('[ws] semua host gagal'); socket.destroy(); return; }
+    proxyUpgrade(req, socket, head, list[i++], next);
+  };
+  next();
+});
+
+function proxyUpgrade(req, socket, head, host, onFail) {
+  const headers = { ...req.headers };
+  delete headers['host'];
+  headers['host'] = host;
+  headers['user-agent'] = uaList[0];
+
+  let ok = false;
+  const up = https.request({
+    hostname: host, port: 443, path: req.url, method: req.method, headers, timeout: 15000,
+  });
+
+  up.on('upgrade', (upRes, upSocket, upHead) => {
+    ok = true;
+    if (DEBUG) console.log(`[ws] ${host} ✓ 101`);
+    let raw = `HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}\r\n`;
+    for (const [k, v] of Object.entries(upRes.headers)) raw += `${k}: ${v}\r\n`;
+    raw += '\r\n';
+    socket.write(raw);
+    if (upHead && upHead.length) socket.write(upHead);
+    if (head && head.length) upSocket.write(head);
+    upSocket.pipe(socket).pipe(upSocket);
+    upSocket.on('error', () => socket.destroy());
+    socket.on('error', () => upSocket.destroy());
+  });
+
+  up.on('response', (r) => {
+    if (DEBUG) console.log(`[ws] ${host} → ${r.statusCode} (bukan 101)`);
+    r.resume();
+    if (!ok) onFail();
+  });
+
+  up.on('error', (e) => {
+    if (DEBUG) console.log(`[ws] ${host} ✗ ${e.code || e.message}`);
+    if (!ok) onFail();
+  });
+
+  up.on('timeout', () => up.destroy(new Error('TIMEOUT')));
+  up.end();
+}
+
+server.listen(PORT, () => console.log(`Listening on ${PORT}`));
+
+// ===== UI =====
+function UI() {
+  const NEED = SET_KEY ? 'true' : 'false';
+  return `<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Backend Manager</title><style>
 *{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:20px}
 .container{max-width:720px;margin:0 auto}h1{font-size:22px;margin:0 0 4px}.sub{color:#94a3b8;font-size:13px;margin-bottom:20px}
 .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:18px;margin-bottom:16px}
@@ -260,31 +235,29 @@ button{padding:9px 16px;border-radius:8px;border:none;cursor:pointer;font-weight
 .empty{color:#64748b;text-align:center;padding:20px;font-style:italic}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(100px);background:#10b981;color:#fff;padding:10px 20px;border-radius:8px;transition:transform .3s;z-index:999}
 .toast.show{transform:translateX(-50%) translateY(0)}.toast.error{background:#ef4444}
-.hint{font-size:12px;color:#64748b;margin-top:6px}
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#1e40af;color:#bfdbfe;font-size:11px;margin-left:6px}
 </style></head><body><div class="container">
 <h1>Backend Manager <span class="badge" id="count">0</span></h1>
-<div class="sub">Kelola daftar host backend. <a href="/debug" target="_blank" style="color:#60a5fa">Cek /debug</a></div>
-<div class="card" id="authCard" style="display:none"><label>SET_KEY</label><input type="password" id="keyInput"><div class="row"><button class="btn-primary" id="saveKey">Simpan Key</button></div></div>
+<div class="sub">Cek backend: <a href="/cek" target="_blank" style="color:#60a5fa">/cek</a></div>
+<div class="card" id="authCard" style="display:none"><label>SET_KEY</label><input type="password" id="keyInput"><div class="row"><button class="btn-primary" id="saveKey">Simpan</button></div></div>
 <div class="card"><label>Tambah backend</label><textarea id="addInput" placeholder="vpn.contoh.workers.dev&#10;vpn.lain.workers.dev"></textarea>
 <div class="row"><button class="btn-green" id="btnAdd">+ Tambah</button><button class="btn-ghost" id="btnSet">Ganti Semua</button></div></div>
-<div class="card"><label>Daftar Backend</label><ul class="list" id="list"></ul>
+<div class="card"><label>Daftar</label><ul class="list" id="list"></ul>
 <div class="row"><button class="btn-danger" id="btnClear">Kosongkan</button><button class="btn-ghost" id="btnRefresh">Refresh</button></div></div>
 </div><div class="toast" id="toast"></div><script>
-const NEED_KEY=${SET_KEY?'true':'false'};const $=(id)=>document.getElementById(id);let key=localStorage.getItem('setKey')||'';
+const NEED=${NEED};const $=(i)=>document.getElementById(i);let key=localStorage.getItem('setKey')||'';
 function toast(m,e){const t=$('toast');t.textContent=m;t.className='toast show'+(e?' error':'');clearTimeout(t._tid);t._tid=setTimeout(()=>t.className='toast',2200);}
 function api(p,m='GET',b){const u=new URL(p,location.origin);if(key)u.searchParams.set('key',key);const o={method:m,headers:{'Content-Type':'application/json'}};if(b)o.body=JSON.stringify(b);return fetch(u,o).then(async r=>{const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'HTTP '+r.status);return j;});}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function renderList(hs){$('count').textContent=hs.length;const ul=$('list');if(!hs.length){ul.innerHTML='<div class="empty">Belum ada backend.</div>';return;}
-ul.innerHTML=hs.map((h,i)=>'<li><span class="idx">'+(i+1)+'.</span><span class="host">'+esc(h)+'</span><button class="btn-danger" data-host="'+esc(h)+'">Hapus</button></li>').join('');
-ul.querySelectorAll('button[data-host]').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('Hapus '+b.dataset.host+'?'))return;try{const r=await api('/set/api/delete','POST',{host:b.dataset.host});renderList(r.hosts);toast('Dihapus');}catch(e){toast(e.message,1);}}));}
-async function refresh(){try{const r=await api('/set/api/list');renderList(r.hosts);}catch(e){toast(e.message,1);if(NEED_KEY&&String(e.message).includes('Unauthorized'))$('authCard').style.display='';}}
-$('saveKey').addEventListener('click',()=>{key=$('keyInput').value.trim();localStorage.setItem('setKey',key);toast('Disimpan');refresh();});
-$('btnAdd').addEventListener('click',async()=>{const h=$('addInput').value.trim();if(!h)return toast('Isi dulu',1);try{const r=await api('/set/api/add','POST',{host:h});renderList(r.hosts);$('addInput').value='';toast('Ditambah');}catch(e){toast(e.message,1);}});
-$('btnSet').addEventListener('click',async()=>{const h=$('addInput').value.trim();if(!h)return toast('Isi dulu',1);if(!confirm('Ganti SEMUA?'))return;try{const r=await api('/set/api/set','POST',{host:h});renderList(r.hosts);$('addInput').value='';toast('Diganti');}catch(e){toast(e.message,1);}});
-$('btnClear').addEventListener('click',async()=>{if(!confirm('Kosongkan?'))return;try{const r=await api('/set/api/clear','POST');renderList(r.hosts);toast('Kosong');}catch(e){toast(e.message,1);}});
-$('btnRefresh').addEventListener('click',refresh);
-if(NEED_KEY&&!key)$('authCard').style.display='';refresh();
-</script></body></html>`; }
-
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+function render(hs){$('count').textContent=hs.length;const ul=$('list');if(!hs.length){ul.innerHTML='<div class="empty">Belum ada backend.</div>';return;}
+ul.innerHTML=hs.map((h,i)=>'<li><span class="idx">'+(i+1)+'.</span><span class="host">'+esc(h)+'</span><button class="btn-danger" data-h="'+esc(h)+'">Hapus</button></li>').join('');
+ul.querySelectorAll('button[data-h]').forEach(b=>b.onclick=async()=>{if(!confirm('Hapus '+b.dataset.h+'?'))return;try{const r=await api('/set/api/delete','POST',{host:b.dataset.h});render(r.hosts);toast('Dihapus');}catch(e){toast(e.message,1);}});}
+async function refresh(){try{const r=await api('/set/api/list');render(r.hosts);}catch(e){toast(e.message,1);if(NEED&&/Unauthorized/.test(e.message))$('authCard').style.display='';}}
+$('saveKey').onclick=()=>{key=$('keyInput').value.trim();localStorage.setItem('setKey',key);toast('Disimpan');refresh();};
+$('btnAdd').onclick=async()=>{const h=$('addInput').value.trim();if(!h)return toast('Isi',1);try{const r=await api('/set/api/add','POST',{host:h});render(r.hosts);$('addInput').value='';toast('OK');}catch(e){toast(e.message,1);}};
+$('btnSet').onclick=async()=>{const h=$('addInput').value.trim();if(!h)return toast('Isi',1);if(!confirm('Ganti SEMUA?'))return;try{const r=await api('/set/api/set','POST',{host:h});render(r.hosts);$('addInput').value='';toast('OK');}catch(e){toast(e.message,1);}};
+$('btnClear').onclick=async()=>{if(!confirm('Kosongkan?'))return;try{const r=await api('/set/api/clear','POST');render(r.hosts);toast('OK');}catch(e){toast(e.message,1);}};
+$('btnRefresh').onclick=refresh;
+if(NEED&&!key)$('authCard').style.display='';refresh();
+</script></body></html>`;
+}
